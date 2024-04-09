@@ -3,32 +3,34 @@ import copy from 'fast-copy'
 const UNRESOLVED_LINK = {} // unique object to avoid polyfill bloat using Symbol()
 
 /**
- * isLink Function
  * Checks if the object has sys.type "Link"
- * @param object
+ * @param {Object} object
+ * @return {Boolean}
  */
-const isLink = (object) => object && object.sys && object.sys.type === 'Link'
+const isLink = (object) => object?.sys?.type === 'Link'
 
 /**
- * isResourceLink Function
  * Checks if the object has sys.type "ResourceLink"
- * @param object
+ * @param {Object} object
+ * @return {Boolean}
  */
-const isResourceLink = (object) => object && object.sys && object.sys.type === 'ResourceLink'
+const isResourceLink = (object) => object?.sys?.type === 'ResourceLink'
 
 /**
- * Creates a key with spaceId and a key without for entityMap
- *
- * @param {*} sys
+ * Creates keys for entityMap
+ * @param {Object} sys
  * @param {String} sys.type
  * @param {String} sys.id
- * @param {*} sys.space
- * @param {*} sys.space.sys
- * @param {String} sys.space.id
- * @return {string[]}
+ * @param {Object} sys.space
+ * @param {Object} sys.space.sys
+ * @param {String} sys.space.sys.id
+ * @param {Object} sys.environment
+ * @param {Object} sys.environment.sys
+ * @param {String} sys.environment.sys.id
+ * @return {String[]}
  */
 const makeEntityMapKeys = (sys) => {
-  if (sys.space && sys.environment) {
+  if (sys.space?.sys && sys.environment?.sys) {
     return [`${sys.type}!${sys.id}`, `${sys.space.sys.id}!${sys.environment.sys.id}!${sys.type}!${sys.id}`]
   }
 
@@ -37,14 +39,13 @@ const makeEntityMapKeys = (sys) => {
 
 /**
  * Looks up in entityMap
- *
- * @param entityMap
- * @param {*} linkData
- * @param {String} linkData.type
+ * @param {Map} entityMap
+ * @param {Object} linkData
+ * @param {String} linkData.entryId
  * @param {String} linkData.linkType
- * @param {String} linkData.id
- * @param {String} linkData.urn
- * @return {String}
+ * @param {String} linkData.spaceId
+ * @param {String} linkData.environmentId
+ * @return {Object|undefined}
  */
 const lookupInEntityMap = (entityMap, linkData) => {
   const { entryId, linkType, spaceId, environmentId } = linkData
@@ -56,29 +57,45 @@ const lookupInEntityMap = (entityMap, linkData) => {
   return entityMap.get(`${linkType}!${entryId}`)
 }
 
+/**
+ * Extracts IDs from URN
+ * @param {String} urn
+ * @return {Object|undefined}
+ */
 const getIdsFromUrn = (urn) => {
-  const regExp = /.*:spaces\/([^/]+)(?:\/environments\/([^/]+))?\/entries\/([^/]+)$/
+  const regExp = /^(.*):spaces\/([^/]+)(?:\/environments\/([^/]+))?\/entries\/([^/]+)$/
 
-  if (!regExp.test(urn)) {
+  try {
+    const [, , spaceId, environmentId = 'master', entryId] = urn.match(regExp) || []
+
+    if (!spaceId || !entryId) {
+      throw new Error('Invalid URN format')
+    }
+
+    return { spaceId, environmentId, entryId }
+  } catch (error) {
+    console.error('Error extracting IDs from URN:', error)
     return undefined
   }
-
-  const [_, spaceId, environmentId = 'master', entryId] = urn.match(regExp)
-  return { spaceId, environmentId, entryId }
 }
 
 /**
- * getResolvedLink Function
- *
- * @param entityMap
- * @param link
- * @return {undefined}
+ * Resolves a link
+ * @param {Map} entityMap
+ * @param {Object} link
+ * @return {Object|undefined}
  */
 const getResolvedLink = (entityMap, link) => {
   const { type, linkType } = link.sys
   if (type === 'ResourceLink') {
     const { urn } = link.sys
-    const { spaceId, environmentId, entryId } = getIdsFromUrn(urn)
+    const ids = getIdsFromUrn(urn)
+
+    if (!ids) {
+      return UNRESOLVED_LINK
+    }
+
+    const { spaceId, environmentId, entryId } = ids
     const extractedLinkType = linkType.split(':')[1]
 
     return (
@@ -96,29 +113,30 @@ const getResolvedLink = (entityMap, link) => {
 }
 
 /**
- * cleanUpLinks Function
- * - Removes unresolvable links from Arrays and Objects
- *
- * @param {Object[]|Object} input
+ * Removes unresolvable links from Arrays and Objects
+ * @param {Array|Object} input
+ * @return {Array|Object}
  */
 const cleanUpLinks = (input) => {
   if (Array.isArray(input)) {
     return input.filter((val) => val !== UNRESOLVED_LINK)
   }
+
   for (const key in input) {
-    if (input[key] === UNRESOLVED_LINK) {
+    if (Object.prototype.hasOwnProperty.call(input, key) && input[key] === UNRESOLVED_LINK) {
       delete input[key]
     }
   }
+
   return input
 }
 
 /**
- * walkMutate Function
- * @param input
- * @param predicate
- * @param mutator
- * @param removeUnresolved
+ * Walks and mutates an object
+ * @param {*} input
+ * @param {Function} predicate
+ * @param {Function} mutator
+ * @param {Boolean} removeUnresolved
  * @return {*}
  */
 const walkMutate = (input, predicate, mutator, removeUnresolved) => {
@@ -128,8 +146,7 @@ const walkMutate = (input, predicate, mutator, removeUnresolved) => {
 
   if (input && typeof input === 'object') {
     for (const key in input) {
-      // eslint-disable-next-line no-prototype-builtins
-      if (input.hasOwnProperty(key)) {
+      if (Object.prototype.hasOwnProperty.call(input, key)) {
         input[key] = walkMutate(input[key], predicate, mutator, removeUnresolved)
       }
     }
@@ -140,6 +157,13 @@ const walkMutate = (input, predicate, mutator, removeUnresolved) => {
   return input
 }
 
+/**
+ * Normalizes a link
+ * @param {Map} entityMap
+ * @param {Object} link
+ * @param {Boolean} removeUnresolved
+ * @return {Object}
+ */
 const normalizeLink = (entityMap, link, removeUnresolved) => {
   const resolvedLink = getResolvedLink(entityMap, link)
   if (resolvedLink === UNRESOLVED_LINK) {
@@ -148,47 +172,44 @@ const normalizeLink = (entityMap, link, removeUnresolved) => {
   return resolvedLink
 }
 
+/**
+ * Creates an entry object based on the provided entry points
+ * @param {Object} item
+ * @param {String[]} itemEntryPoints
+ * @return {Object}
+ */
 const makeEntryObject = (item, itemEntryPoints) => {
   if (!Array.isArray(itemEntryPoints)) {
     return item
   }
 
-  const entryPoints = Object.keys(item).filter((ownKey) => itemEntryPoints.indexOf(ownKey) !== -1)
-
-  return entryPoints.reduce((entryObj, entryPoint) => {
-    entryObj[entryPoint] = item[entryPoint]
+  return itemEntryPoints.reduce((entryObj, entryPoint) => {
+    if (Object.prototype.hasOwnProperty.call(item, entryPoint)) {
+      entryObj[entryPoint] = item[entryPoint]
+    }
     return entryObj
   }, {})
 }
 
 /**
- * resolveResponse Function
- * Resolves contentful response to normalized form.
- * @param {Object} response Contentful response
- * @param {{removeUnresolved: Boolean, itemEntryPoints: Array<String>}|{}} options
- * @param {Boolean} options.removeUnresolved - Remove unresolved links default:false
- * @param {Array<String>} options.itemEntryPoints - Resolve links only in those item properties
- * @return {Object}
+ * Resolves contentful response to normalized form
+ * @param {Object} response - Contentful response
+ * @param {Object} [options={}]
+ * @param {Boolean} [options.removeUnresolved=false] - Remove unresolved links
+ * @param {String[]} [options.itemEntryPoints=[]] - Resolve links only in those item properties
+ * @return {Object[]}
  */
-const resolveResponse = (response, options) => {
-  options = options || {}
+const resolveResponse = (response, options = {}) => {
   if (!response.items) {
     return []
   }
-  const responseClone = copy(response)
-  const allIncludes = Object.keys(responseClone.includes || {}).reduce(
-    (all, type) => [...all, ...response.includes[type]],
-    [],
-  )
 
+  const responseClone = copy(response)
+  const allIncludes = Object.values(responseClone.includes || []).flat()
   const allEntries = [...responseClone.items, ...allIncludes].filter((entity) => Boolean(entity.sys))
 
   const entityMap = new Map(
-    allEntries.reduce((acc, entity) => {
-      const entries = makeEntityMapKeys(entity.sys).map((key) => [key, entity])
-      acc.push(...entries)
-      return acc
-    }, []),
+    allEntries.flatMap((entity) => makeEntityMapKeys(entity.sys).map((key) => [key, entity])),
   )
 
   allEntries.forEach((item) => {
